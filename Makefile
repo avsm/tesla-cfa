@@ -7,7 +7,7 @@ SOURCES = spl_utils.mli spl_utils.ml spl_location.ml spl_syntaxtree.ml \
 	splc.ml
 RESULT = splc
 TRASH = spl_parser.output spl_parser.ml spl_lexer.ml
-ANNOT = yes
+ANNOTATE = yes
 LIBS= str
 
 .PHONY: all native bytecode
