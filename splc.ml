@@ -23,8 +23,9 @@ type output_mode =
     |Dot
     |OCaml
     |Promela
+    |Tesla
     
-let default_output_mode = Promela
+let default_output_mode = Tesla
 let default_optimisation = true
 let default_log_level = Logger.Normal
 
@@ -52,10 +53,11 @@ let main =
         "Debug mode [false]";
         "-t", Arg.String (fun x -> mode := match x with
             |"ocaml"|"ml" -> OCaml
+            |"tesla" -> Tesla
             |"dot" -> Dot
             |"promela"|"pro" -> Promela
             |x -> raise (Arg.Bad ("Unknown output type: " ^ x))),
-        "Output mode [c|ocaml|dot|promela]";
+        "Output mode [tesla|ocaml|dot|promela]";
         "-s", Arg.String (fun x -> statecall_fname := Some x),
         "Filename for statecalls output (backend specific)";
         "-o", Arg.String (fun x -> ofile := Some x),
@@ -109,6 +111,29 @@ let main =
             in
             Spl_dot.generate dot_ochan genv;
         ) results;
+        exit 0
+    |Tesla ->
+        let sfile = match !statecall_fname with
+        |None -> failwith "Must specify specification filename with -s for Telsa"
+        |Some x -> x in
+        let fnames =
+            if List.length !files = 1 then begin
+                match !ofile with
+                |None -> [safe_chop (List.hd !files)]
+                |Some x -> [x]
+            end else begin
+                match !ofile with
+                |None ->
+                    List.map (fun x -> safe_chop x) !files
+                |Some b ->
+                    let basenm = safe_chop b in
+                    List.map (fun x -> basenm ^ "_" ^
+                        (safe_chop (Filename.basename x))) !files
+            end;
+        in
+        Logger.log (sprintf "Input files: %s" (String.concat " " !files));
+        Logger.log (sprintf "Output files: %s" (String.concat " " fnames));
+        Spl_tesla.generate sfile fnames !debug results;
         exit 0
     |OCaml  ->
         let sfile = match !statecall_fname with
