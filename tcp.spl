@@ -1,0 +1,56 @@
+function tcp_process() {
+    either {
+      Net_Rx_FIN;
+      Net_Tx_ACK;             /* -> CLOSE_WAIT */
+      App_Close;
+      Net_Tx_FIN;             /* -> LAST_ACK   */
+      either { Net_Rx_FIN_ACK; } or { Timeout; }
+    } or {
+      App_Close;
+      Net_Tx_FIN;             /* -> FIN_WAIT_1 */
+      either {
+        Net_Rx_FIN;
+        Net_Tx_ACK;           /* -> CLOSING */
+        Net_Rx_FIN_ACK;       /* -> TIME_WAIT */
+     } or {
+        Net_Rx_FIN_ACK;       /* -> FIN_WAIT_2 */
+        Net_Rx_FIN;
+        Net_Tx_ACK;           /* -> TIME_WAIT */
+      }
+      Timeout_2MSL;
+    } or {
+      Net_Rx_RST;
+    }
+    Free_TCB;  /* -> CLOSED */
+}
+
+automaton tcp_create(bool established) {
+  either {
+    App_Listen;             /* -> LISTEN    */
+    Net_Rx_SYN;
+    Allocate_TCB;           /* Alloc new pcb */
+    do {
+      Net_Tx_SYN_ACK;       /* -> SYN_RCVED   */
+      either {
+        Net_Rx_RST;         /* -> LISTEN */
+        Free_TCB;
+      } or {
+        established=true; 
+        tcp_process();
+      }
+    } until (established);
+  } or {
+    App_Connect;
+    Net_Tx_SYN;             /* -> SYN_SENT  */
+    either {
+      either { Timeout; } or { App_Close; }
+      Free_TCB;
+    } or {
+      Net_Rx_SYN_ACK;
+      Net_Tx_ACK; 
+      tcp_process();
+    }
+  }
+}
+
+
