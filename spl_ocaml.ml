@@ -307,8 +307,6 @@ let pp_env env e =
     e.p "]";
     e.nl ();
 
-    let html_of_str b = sprintf "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s"
-        (String.length b) b in
     let rs = export_fun_map (fun fname _ _ ->
         fname, (sprintf "%s.states" (String.capitalize fname)), false) env in
     let rschan = ("__cfn","(unit -> (out_channel * in_channel)) option", true) :: rs in
