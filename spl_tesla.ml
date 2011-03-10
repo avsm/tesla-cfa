@@ -138,212 +138,138 @@ let pp_record_type e tname t =
   e.p "};";
   e.nl ()
 
-let pp_state_set e tname t =
-  let args = String.concat ", " (List.map
-    (fun (nm, ty, _) ->
-      sprintf "%s %s" ty nm
-    ) t) in
-  e.p (sprintf "void %s_add(struct %s *s, uint8_t off, %s)" tname tname args);
-  e.p "{";
-  indent_fn e (fun e ->
-    List.iter (fun (nm, ty, _) ->
-      e.p (sprintf "%s[off].%s = %s;" tname nm nm);
-    ) t;
-  );
-  e.p "};"
-
-let emit_bad_statecall e =
-  e.p "tesla_bad_transition();"
- 
 let pp_env env e =
-  let max_states = 5 in (* TODO: derive from graph *)
   e.p "#include <stdio.h>";
   e.p "#include <stdint.h>";
-  e.p (sprintf "#define MAX_STATES %d" max_states);
   let num_of_state s = Hashtbl.find env.statenum s in
   e.nl ();
   export_fun_iter (fun func_name func_env func_def ->
     let block_list = blocks_of_function func_env env.funcs in
     let registers = list_of_registers func_env in
     pp_record_type e func_name (List.map ocaml_type_of_arg registers);
-    e.p (sprintf "struct %s %s_states1[MAX_STATES];" func_name func_name);
-    e.p (sprintf "struct %s %s_states2[MAX_STATES];" func_name func_name);
-    e.p (sprintf "uint8_t %s_num_states;" func_name);
-    e.nl ();
-    pp_state_set e func_name (List.map ocaml_type_of_arg registers);
     e.nl ();
     let is_sink_state state = List.length state.edges = 0 in
-    let rec tickfn e sym targ =
-      e.p (sprintf "/* %s */" targ.label);
+
+    (* Execute a state until we cant any more. sym is the symbol register table *)
+    let rec tickfn e sym from_state targ =
+      e.p (sprintf "/* event %s -> %s */" from_state.label targ.label);
       let mfn fn = List.filter (fun x -> fn x.t) targ.edges in
       let msgtrans = mfn (function Message _ -> true |_ -> false) in
       let condtrans = mfn (function Condition _ -> true |_ -> false) in
       let asstrans = mfn (function Assignment _ -> true |_ -> false) in
       let aborttrans = mfn (function |Terminate -> true |_ -> false) in
+      (* Helper fun to get register value or default *)
+      let reg_value reg =
+        let reg_name = var_name_of_arg reg in
+        try
+          let expr = List.assoc reg_name sym in
+          ocaml_string_of_expr expr
+        with Not_found ->
+          sprintf "s1[i].%s" reg_name
+      in
       if List.length aborttrans > 0 then begin
-      emit_bad_statecall e;
+        e.p "tesla_abort();"
       end else begin
-        if List.length msgtrans > 0 || (is_sink_state targ) then begin
-          let seenh = Hashtbl.create 1 in
-          let symbind = String.concat ";"
-            (List.fold_left (fun a (k,v) ->
-              if not (Hashtbl.mem seenh k) then begin
-                Hashtbl.add seenh k ();
-                let nex = reduce_expr (List.remove_assoc k sym) v in
-                sprintf "%s=%s" k (ocaml_string_of_expr nex) :: a
-              end else a
-              ) [] sym
-            ) in
-           let regfn x = e.p
-             (sprintf "register_state %d %s h; (* %s *)" (num_of_state targ.label) x targ.label) in
-                        match List.length sym with
-                        |0 -> regfn "x"
-                        |len when len = (List.length registers) ->
-                            regfn (sprintf "{%s}" symbind);
-                        |_ -> regfn (sprintf "{x with %s}" symbind)
-                    end;
-                    (* Group common conditionals together *)
-                    let condhash = Hashtbl.create 1 in
-                    List.iter (fun x -> match x.t with
-                        |Condition c -> hashtbl_add_list condhash (reduce_expr sym c) x
-                        |_ -> failwith "err") condtrans;
-                    (* Partition conditionals into value checks against consts and other *)
-                    let condvals = Hashtbl.create 1 in
-                    let condother = Hashtbl.create 1 in
-                    Hashtbl.iter (fun c xs ->
-                        match c with
-                        |Equals (Identifier i, Int_constant v) ->
-                            hashtbl_add_list condvals i (v,xs)
-                        |_ -> Hashtbl.add condother c xs
-                    ) condhash;
-                    (* Pattern match conditionals *)
-                    Hashtbl.iter (fun i vxs ->
-                        e.p "begin";
-                        e.p (sprintf "match %s with" (ocaml_string_of_expr (Identifier i)));
-                        List.iter (fun (v,xs) ->
-                        e.p (sprintf "|%d -> begin" v);
-                        indent_fn e (fun e -> List.iter (fun x -> tickfn e sym !(x.target)) xs);
-                        indent_fn e (fun e -> e.p "end");
-                        ) vxs;
-                        e.p "|_ -> failwith \"internal error\"";
-                        e.p "end;"
-                    ) condvals;
-                    (* All other conditionals *)
-                    Hashtbl.iter (fun c xs ->
-                        match c with
-                        |True ->
-                            e.p (sprintf "begin (* if %s *) " (ocaml_string_of_expr c));
-                            indent_fn e (fun e -> List.iter (fun x -> tickfn e sym !(x.target)) xs);
-                            e.p "end;";
-                        |False -> e.p (sprintf "(* skipped %s *)" (ocaml_string_of_expr c));
-                        |c ->
-                            e.p (sprintf "if %s then begin" (ocaml_string_of_expr c));
-                            indent_fn e (fun e -> List.iter (fun x -> tickfn e sym !(x.target)) xs);
-                            e.p "end;"
-                    ) condother;
-                    (* Assignment blocks *)
-                    List.iter (fun x -> match x.t with
-                        |Assignment (var,expr) ->
-                            e.p (sprintf "begin (* let %s = %s in *) " var (ocaml_string_of_expr (reduce_expr sym expr)));
-                            indent_fn e (fun e -> tickfn e ((var,expr)::sym) !(x.target));
-                            e.p "end;";
-                        |_ -> ()
-                    ) asstrans;
-                end
-            in
-            e.p "let rec tick msg (s:states) : states =";
-            indent_fn e (fun e ->
-                e.p "let h = Hashtbl.create 17 in";
-                if List.length registers > 0 then
-                    e.p "Hashtbl.iter (fun st xs -> List.iter (fun x -> match st,msg with"
-                else 
-                    e.p "Hashtbl.iter (fun st x -> match st,msg with";
-                List.iter (fun state ->
-                    (* pull out all the Message transitions from this state *)
-                    let msghash = Hashtbl.create 1 in
-                    List.iter (fun x -> match x.t with
-                        |Message id -> hashtbl_add_list msghash id x  |_ -> ()) state.edges;
-                    Hashtbl.iter (fun id xs ->
-                        e.p (sprintf "|%d,`%s (* %s *) ->" (num_of_state state.label) id state.label);
-                        List.iter (fun x -> match x.t with
-                        |Message id ->
-                            indent_fn e (fun e ->
-                                (* we got a statecall leading to ... *)
-                                let targ_state = !(x.target) in
-                                tickfn e [] targ_state;
-                            );
-                         |_ -> failwith "message"
-                        ) xs;
-                    ) msghash;
-                ) block_list;
-                e.p " |_ -> ()";
-                if List.length registers > 0 then
-                    e.p ") xs) s;"
-                else
-                    e.p ") s;";
-                e.p "if Hashtbl.length h = 0 then raise Bad_statecall else h";
-            );
-            e.nl();
-            e.p "let init () =";
-            indent_fn e (fun e ->
-                let ist = initial_state_of_env func_env in
-                e.p (sprintf "let h = Hashtbl.create 17 in");
-                if List.length registers > 0 then begin
-                    e.p "let x = {";
-                    List.iter (fun a -> e.p (sprintf "%s;" (initial_value_of_arg a))) registers;
-                    e.p "} in";  
-                end else
-                    e.p "let x = () in";
-                tickfn e [] ist;
-                e.p "h"
-            );
-            e.nl ();
-            e.p "let active = function";
-            List.iter (fun state ->
-                let msgtrans = List.filter (fun x ->
-                    match x.t with |Message _ -> true |_ -> false) state.edges in
-                let msglocs = List.map (fun x -> may None (fun l -> Some l.Spl_location.line_num) x.loc) msgtrans in
-                let actlocs = List.fold_left (fun a -> function None -> a
-                    |Some b -> if List.mem b a then a else b :: a) [] msglocs in
-                e.p (sprintf "|%d (* %s *) -> [%s]" (num_of_state state.label) state.label
-                    (String.concat ";" (List.map string_of_int actlocs)));
-                ()
-            ) block_list;
-            e.p ("|_ -> failwith \"internal error\"");
-        ) env;
-    e.p "type s = [";
-    hashtbl_iter_indent e (fun e scall _ -> e.p (sprintf "|`%s" scall)) env.statecalls;
-    e.p "]";
-    e.nl ();
+         if List.length msgtrans > 0 || (is_sink_state targ) then begin
+           (* For each register, set it in the state descriptor *)
+           List.iter (fun reg ->
+             e.p (sprintf "s2[curpos].%s = %s;" (var_name_of_arg reg) (reg_value reg))
+           ) registers;
+           e.p (sprintf "s2[curpos].state = %d;" (num_of_state targ.label));
+           e.p "curpos++;";
+         end;
+      (* Group common conditionals together *)
+      let condhash = Hashtbl.create 1 in
+      List.iter (fun x -> match x.t with
+        |Condition c -> hashtbl_add_list condhash (reduce_expr sym c) x
+        |_ -> failwith "err") condtrans;
 
-    let rs = export_fun_map (fun fname _ _ ->
-        fname, (sprintf "%s.states" (String.capitalize fname)), false) env in
-    let rschan = ("__cfn","(unit -> (out_channel * in_channel)) option", true) :: rs in
-    indent_fn e (fun e ->
-        export_fun_iter (fun fname _ _ ->
-            e.p (sprintf "%s = %s.init ();" fname (String.capitalize fname));
-        ) env;
-    );
-    e.p "}";
-    e.nl ();
-    let cap = String.capitalize in
-    e.nl ();
-    e.p "let tick s x =";
-    indent_fn e (fun e ->
-        e.p "let r = match x with"
-    );
-    hashtbl_iter_indent e (fun e scall funcs ->
-        e.p (sprintf "|`%s -> " scall);
+      (* Partition conditionals into value checks against consts and other *)
+      let condvals = Hashtbl.create 1 in
+      let condother = Hashtbl.create 1 in
+      Hashtbl.iter (fun c xs ->
+        match c with
+        |Equals (Identifier i, Int_constant v) ->
+          hashtbl_add_list condvals i (v,xs)
+        |_ -> Hashtbl.add condother c xs
+      ) condhash;
+
+      (* Pattern match conditionals *)
+      Hashtbl.iter (fun i vxs ->
+        let foo = 
+          try
+            let _ = List.assoc i sym in
+            failwith "todo"
+          with Not_found ->
+            sprintf "s1[curpos].%s" i
+        in
+        e.p (sprintf "switch (%s) {" foo);
+        List.iter (fun (v,xs) ->
+          e.p (sprintf " case %d:" v);
+          indent_fn e (fun e ->
+            List.iter (fun x -> tickfn e sym from_state !(x.target)) xs;
+            e.p "break;"
+          );
+        ) vxs;
+        e.p " default:";
+        indent_fn e (fun e -> e.p "tesla_internal_error ();");
+        e.p "}";
+      ) condvals;
+
+      (* All other conditionals *)
+      Hashtbl.iter (fun c xs ->
+        match c with
+        |True ->
+          e.p (sprintf "begin (* if %s *) " (ocaml_string_of_expr c));
+          indent_fn e (fun e -> List.iter (fun x -> tickfn e sym from_state !(x.target)) xs);
+          e.p "end;";
+        |False -> e.p (sprintf "(* skipped %s *)" (ocaml_string_of_expr c));
+        |c ->
+          e.p (sprintf "if %s then begin" (ocaml_string_of_expr c));
+          indent_fn e (fun e -> List.iter (fun x -> tickfn e sym from_state !(x.target)) xs);
+          e.p "end;"
+        ) condother;
+
+      (* Assignment blocks *)
+      List.iter (fun x -> match x.t with
+        |Assignment (var,expr) ->
+          e.p (sprintf "/* register %s = %s */" var (ocaml_string_of_expr (reduce_expr sym expr)));
+          tickfn e ((var,expr)::sym) from_state !(x.target);
+        |_ -> ()
+       ) asstrans;
+      end
+    in
+    (* Output a function for each input event *)
+    Hashtbl.iter (fun scall funcs ->
+      e.p (sprintf "int %s_event_%s(struct %s *s1, int sz, struct %s *s2) {"
+        func_name scall func_name func_name);
+      indent_fn e (fun e ->
+        (* s1[sz] is current state and we place result in s2 and return [curpos] *)
+        e.p "uint8_t curpos = 0;";
+        e.p "for (uint8_t i=0; i<sz; i++) {";
         indent_fn e (fun e ->
-            if env.debug then e.p "let x' = try";
-            e.p "{s with";
-            List.iter (fun x ->
-                e.p (sprintf "%s = (%s.tick `%s s.%s);" x (cap x) scall x)) funcs;
-            e.p "}";
-            if env.debug then e.p (sprintf "with Bad_statecall -> (badfn %S s; raise Bad_statecall) in actionfn %S x'; x' " scall scall);
+          e.p "switch (s1[i].state) {";
+          let valid_states = Spl_cfg.valid_states_for_statecall block_list scall in
+          List.iter (fun (state,targets) ->
+            let state_name = state.Spl_cfg.label in
+            e.p (sprintf "case %d:" (num_of_state state_name));
+            indent_fn e (fun e ->
+              (* default symbol table is existing register values *)
+              List.iter (tickfn e [] state) targets;
+              e.p "break;";
+            );
+          ) valid_states;
+          e.p "default:";
+          indent_fn e (fun e -> e.p "tesla_error();");
+          e.p "}";
         );
+        e.p "}";
+      );
+      e.p "}";
+      e.nl ()
     ) env.statecalls;
-    indent_fn e (fun e -> e.p "|_ -> s in r")
+  ) env;
+  e.nl ()
 
 (* Populate hashtable with (statecall -> [automaton using it list]) *)
 let rec extract_statecalls fname env func_env =
@@ -395,7 +321,7 @@ let generate sfile ofiles debug genvs  =
     let schan = open_out (sfile ^ ".spec") in
     let envs = List.map2 (fun genv ofile ->
       let mlout = open_out (ofile ^ ".c") in
-      let penvml = init_printer mlout in
+      let penvml = init_printer ~header:false mlout in
       let env = { statenum = Hashtbl.create 1; statecalls = Hashtbl.create 1;
         funcs = genv.functions; debug=debug; } in
       export_fun_iter (fun fname fenv fdef -> extract_statecalls fname env fenv) env;

@@ -34,8 +34,7 @@ type state = {
   label: string;
   mutable edges: transition list;
 }
-and
-transition = {
+and transition = {
   t: transition_method;
   target: state ref;
   cl: transition_class;
@@ -50,6 +49,22 @@ type env = {
   registers: (var_type, unit) Hashtbl.t;
   functions_called: (string, unit) Hashtbl.t;
 }
+
+(* Get all states for which a given statecall is a valid outgoing transition,
+   from a list of blocks, and their target states *)
+let valid_states_for_statecall states sc =
+  List.fold_left (fun acc state ->
+    let has_transition t =
+      match t.t with |Message id when id=sc -> true |_ -> false in
+    let edges = List.fold_left (fun acc edge ->
+      if has_transition edge then
+        !(edge.target) :: acc
+      else acc
+    ) [] state.edges in
+    match edges with 
+    |[] -> acc
+    |_ -> (state,edges) :: acc
+  ) [] states
 
 type compiled_functions =
   (string, env * Spl_syntaxtree.func) Hashtbl.t
@@ -129,7 +144,8 @@ let list_of_registers e =
 let reg_name f x = sprintf "%s_%s" f x
 
 let reg_arg f = function
-  | Integer x -> Integer (reg_name f x) | Boolean x -> Boolean (reg_name f x)
+  | Integer x -> Integer (reg_name f x)
+  | Boolean x -> Boolean (reg_name f x)
   | Unknown x -> failwith "type checker invariant failure"
 
 (* Get a flat list of blocks for a function *)
