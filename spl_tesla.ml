@@ -46,21 +46,22 @@ let rec reduce_expr sym ex =
     | True -> True | False -> False
     | Identifier i ->
         try 
-            let ex = List.assoc i sym in
-            let sym = List.remove_assoc i sym in
-            reduce_expr sym ex
+          let ex = List.assoc i sym in
+          let sym = List.remove_assoc i sym in
+          reduce_expr sym ex
         with Not_found -> Identifier i
     in Spl_optimiser.fold (fn ex)
 
 (* Convert expression to a string *)
-let rec ocaml_string_of_expr ex =
+let rec ocaml_string_of_expr ?reduce ex =
     let rec fn = function
     | And (a,b) -> sprintf "(%s && %s)" 
         (fn a) (fn b)
     | Or (a,b) -> sprintf "(%s || %s)" 
         (fn a) (fn b)
-    | Identifier i -> sprintf "%s" i
-    | Not e -> sprintf "(! %s)" (fn e)
+    | Identifier i -> 
+        (match reduce with None -> i | Some fn -> fn i)
+    | Not e -> sprintf "(!%s)" (fn e)
     | Greater (a,b) -> sprintf "(%s > %s)"
         (fn a) (fn b)
     | Less (a,b) -> sprintf "(%s < %s)" 
@@ -147,9 +148,7 @@ let pp_env env e =
     let block_list = blocks_of_function func_env env.funcs in
     let registers = list_of_registers func_env in
     pp_record_type e func_name (List.map ocaml_type_of_arg registers);
-    e.nl ();
     let is_sink_state state = List.length state.edges = 0 in
-
     (* Execute a state until we cant any more. sym is the symbol register table *)
     let rec tickfn e sym from_state targ =
       e.p (sprintf "/* event %s -> %s */" from_state.label targ.label);
@@ -159,8 +158,7 @@ let pp_env env e =
       let asstrans = mfn (function Assignment _ -> true |_ -> false) in
       let aborttrans = mfn (function |Terminate -> true |_ -> false) in
       (* Helper fun to get register value or default *)
-      let reg_value reg =
-        let reg_name = var_name_of_arg reg in
+      let reg_value reg_name =
         try
           let expr = List.assoc reg_name sym in
           ocaml_string_of_expr expr
@@ -173,7 +171,8 @@ let pp_env env e =
          if List.length msgtrans > 0 || (is_sink_state targ) then begin
            (* For each register, set it in the state descriptor *)
            List.iter (fun reg ->
-             e.p (sprintf "s2[curpos].%s = %s;" (var_name_of_arg reg) (reg_value reg))
+             let reg_name = var_name_of_arg reg in
+             e.p (sprintf "s2[curpos].%s = %s;" reg_name (reg_value reg_name))
            ) registers;
            e.p (sprintf "s2[curpos].state = %d;" (num_of_state targ.label));
            e.p "curpos++;";
@@ -196,14 +195,7 @@ let pp_env env e =
 
       (* Pattern match conditionals *)
       Hashtbl.iter (fun i vxs ->
-        let foo = 
-          try
-            let _ = List.assoc i sym in
-            failwith "todo"
-          with Not_found ->
-            sprintf "s1[curpos].%s" i
-        in
-        e.p (sprintf "switch (%s) {" foo);
+        e.p (sprintf "switch (%s) {" (reg_value i));
         List.iter (fun (v,xs) ->
           e.p (sprintf " case %d:" v);
           indent_fn e (fun e ->
@@ -212,7 +204,10 @@ let pp_env env e =
           );
         ) vxs;
         e.p " default:";
-        indent_fn e (fun e -> e.p "tesla_internal_error ();");
+        indent_fn e (fun e ->
+          e.p "tesla_internal_error ();";
+          e.p "break;";
+        );
         e.p "}";
       ) condvals;
 
@@ -220,14 +215,16 @@ let pp_env env e =
       Hashtbl.iter (fun c xs ->
         match c with
         |True ->
-          e.p (sprintf "begin (* if %s *) " (ocaml_string_of_expr c));
-          indent_fn e (fun e -> List.iter (fun x -> tickfn e sym from_state !(x.target)) xs);
-          e.p "end;";
-        |False -> e.p (sprintf "(* skipped %s *)" (ocaml_string_of_expr c));
+          e.p (sprintf "/* if (%s) */" (ocaml_string_of_expr c));
+          indent_fn e (fun e ->
+            List.iter (fun x -> tickfn e sym from_state !(x.target)) xs);
+        |False ->
+          e.p (sprintf "/* skipped %s */" (ocaml_string_of_expr c));
         |c ->
-          e.p (sprintf "if %s then begin" (ocaml_string_of_expr c));
-          indent_fn e (fun e -> List.iter (fun x -> tickfn e sym from_state !(x.target)) xs);
-          e.p "end;"
+          e.p (sprintf "if (%s) {" (ocaml_string_of_expr ~reduce:reg_value c));
+          indent_fn e (fun e ->
+            List.iter (fun x -> tickfn e sym from_state !(x.target)) xs);
+          e.p "}"
         ) condother;
 
       (* Assignment blocks *)
@@ -245,8 +242,8 @@ let pp_env env e =
         func_name scall func_name func_name);
       indent_fn e (fun e ->
         (* s1[sz] is current state and we place result in s2 and return [curpos] *)
-        e.p "uint8_t curpos = 0;";
-        e.p "for (uint8_t i=0; i<sz; i++) {";
+        e.p "uint8_t i,curpos=0;";
+        e.p "for (i=0; i<sz; i++) {";
         indent_fn e (fun e ->
           e.p "switch (s1[i].state) {";
           let valid_states = Spl_cfg.valid_states_for_statecall block_list scall in
@@ -265,6 +262,7 @@ let pp_env env e =
         );
         e.p "}";
       );
+      e.p "return curpos;";
       e.p "}";
       e.nl ()
     ) env.statecalls;
