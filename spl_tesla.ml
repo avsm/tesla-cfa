@@ -148,6 +148,16 @@ let pp_env env e =
     let block_list = blocks_of_function func_env env.funcs in
     let registers = list_of_registers func_env in
     pp_record_type e func_name (List.map ocaml_type_of_arg registers);
+    e.p (sprintf "void %s_init(struct %s *s) {" func_name func_name);
+    indent_fn e (fun e ->
+      let ist = initial_state_of_env func_env in
+      e.p (sprintf "s->state = %d; /* %s */" (num_of_state ist.label) ist.label);
+      List.iter (fun (k,_,_) ->
+        e.p (sprintf "s->%s = 0;" k);
+      ) (List.map ocaml_type_of_arg registers);
+    );
+    e.p "}";
+    e.nl ();
     let is_sink_state state = List.length state.edges = 0 in
     (* Execute a state until we cant any more. sym is the symbol register table *)
     let rec tickfn e sym from_state targ =
