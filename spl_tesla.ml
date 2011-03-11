@@ -316,12 +316,18 @@ let generate_interface envs e =
         (fun k v -> Hashtbl.replace statecalls k ()) env.statecalls) envs;
     let names = List.sort Pervasives.compare 
         (Hashtbl.fold (fun k v a -> k :: a) statecalls []) in
-    e.p "type t = [";
-    indent_fn e (fun e -> List.iter (fun s -> e.p (sprintf "|`%s" s)) names);
-    e.p "]";
-    e.nl ();
-    e.p "let string_of_statecall (x:t) = match x with";
-    indent_fn e (fun e -> List.iter (fun s -> e.p (sprintf "|`%s -> \"%s\"" s s)) names);
+    List.iter (fun name ->
+      let bits = Str.split (Str.regexp_string "_") (String.lowercase name) in
+      match bits with
+      | "assign" :: struct_name :: field_name :: value ->
+          e.p (String.concat "," bits)
+      | "net" :: mode :: [flag] ->
+          e.p (sprintf "net,%s,,%s" mode flag)
+      | "invoke" :: tl ->
+          e.p (sprintf "invoke,%s" (String.concat "_" tl))
+      | x ->
+          e.p (sprintf "UNKNOWN,%s" (String.concat "_" x))
+    ) names;
     e.nl ()
     
 let generate sfile ofiles debug genvs  =

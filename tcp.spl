@@ -3,19 +3,19 @@ function tcp_process() {
       Net_Rx_FIN;
       Net_Tx_ACK;
       Assign_pcb_tstate_CLOSE_WAIT;
-      App_Close;
+      Invoke_app_close;
       Net_Tx_FIN;
       Assign_pcb_tstate_LAST_ACK;
-      either { Net_Rx_FIN_ACK; } or { Timeout; }
+      either { Net_Rx_FINACK; } or { Invoke_timeout; }
     } or {
-      App_Close;
+      Invoke_app_close;
       Net_Tx_FIN;
       Assign_pcb_tstate_FIN_WAIT_1;
       either {
         Net_Rx_FIN;
         Net_Tx_ACK;
         Assign_pcb_tstate_CLOSING;
-        Net_Rx_FIN_ACK;
+        Net_Rx_FINACK;
         Assign_pcb_tstate_TIME_WAIT;
      } or {
         Net_Rx_FIN_ACK;
@@ -24,11 +24,11 @@ function tcp_process() {
         Net_Tx_ACK;
         Assign_pcb_tstate_TIME_WAIT;
       }
-      Timeout_2MSL;
+      Invoke_timeout_2MSL;
     } or {
       Net_Rx_RST;
     }
-    Free_TCB;  /* -> CLOSED */
+    Invoke_free_tcb;  /* -> CLOSED */
 }
 
 automaton tcp_create(bool established) {
@@ -38,28 +38,28 @@ automaton tcp_create(bool established) {
     Invoke_pru_accept;
     Assign_pcb_tstate_LISTEN;
     Net_Rx_SYN;
-    Allocate_TCB;           /* Alloc new pcb */
+    Invoke_malloc_tcb;           /* Alloc new pcb */
     do {
-      Net_Tx_SYN_ACK;
+      Net_Tx_SYNACK;
       Assign_pcb_tstate_SYN_RCVED;
       either {
         Net_Rx_RST;
         Assign_pcb_tstate_LISTEN;
-        Free_TCB;
+        Invoke_free_tcb;
       } or {
         established=true; 
         tcp_process();
       }
     } until (established);
   } or {
-    App_Connect;
+    Invoke_app_connect;
     Net_Tx_SYN; 
     Assign_pcb_tstate_SYN_SENT;
     either {
-      either { Timeout; } or { App_Close; }
-      Free_TCB;
+      either { Invoke_timeout; } or { Invoke_app_close; }
+      Invoke_free_tcb;
     } or {
-      Net_Rx_SYN_ACK;
+      Net_Rx_SYNACK;
       Net_Tx_ACK; 
       tcp_process();
     }
